@@ -1,0 +1,22 @@
+index=windows (sourcetype="WinEventLog:System" OR sourcetype="XmlWinEventLog:System")
+    (EventCode=7045 OR EventID=7045)
+| eval event_id=tonumber(coalesce(EventCode,EventID))
+| where event_id=7045
+| rex field=_raw "(?im)^\s*Service Name:\s*(?<raw_service_name>[^\r\n]+)"
+| rex field=_raw "(?im)^\s*Service File Name:\s*(?<raw_service_path>[^\r\n]+)"
+| rex field=_raw "(?im)^\s*Service Account:\s*(?<raw_service_account>[^\r\n]+)"
+| eval service_name=coalesce(ServiceName,Service_Name,raw_service_name)
+| eval service_path=coalesce(ServiceFileName,Service_File_Name,ImagePath,raw_service_path)
+| eval service_account=coalesce(ServiceAccount,Service_Account,AccountName,raw_service_account)
+| eval dest_host=coalesce(ComputerName,host)
+| where isnotnull(service_path)
+| eval path_writable=if(match(service_path,"(?i)\\\\users\\\\public\\\\|\\\\appdata\\\\|\\\\windows\\\\temp\\\\|\\\\temp\\\\"),1,0)
+| eval interpreter=if(match(service_path,"(?i)(powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd\.exe|wscript\.exe|cscript\.exe|mshta\.exe|rundll32\.exe)"),1,0)
+| eval runs_as_system=if(match(coalesce(service_account,""),"(?i)(localsystem|local system|nt authority\\\\system)"),1,0)
+| eval risk_score=(30*path_writable)+(25*interpreter)+(10*runs_as_system)
+| where path_writable=1 OR interpreter=1
+| eval reason=mvappend(if(path_writable=1,"Executable/command references potentially writable directory",null()),if(interpreter=1,"Service command invokes script host or interpreter",null()),if(runs_as_system=1,"Service configured for SYSTEM context",null()))
+| eval reasons=mvjoin(reason,"; ")
+| table _time dest_host service_name service_path service_account path_writable interpreter runs_as_system risk_score reasons
+| sort 0 -risk_score -_time
+
