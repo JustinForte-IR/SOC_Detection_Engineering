@@ -1,0 +1,16 @@
+
+index=windows (sourcetype="WinEventLog:Security" OR sourcetype="XmlWinEventLog:Security") (EventCode=4624 OR EventCode=4625)
+| eval event_id=tonumber(coalesce(EventCode, EventID))
+| eval logon_type=tonumber(coalesce(Logon_Type, LogonType))
+| where logon_type=10 AND (event_id=4624 OR event_id=4625)
+| eval account=coalesce(TargetUserName, user)
+| eval src_ip=coalesce(IpAddress, Source_Network_Address, src_ip)
+| eval dest_host=coalesce(ComputerName, host)
+| where isnotnull(account) AND isnotnull(src_ip) AND src_ip!="-" AND src_ip!="127.0.0.1" AND src_ip!="::1"
+| eval event_time=_time
+| bin _time span=15m
+| stats count(eval(event_id=4625)) AS failure_count count(eval(event_id=4624)) AS success_count min(eval(if(event_id=4625,event_time,null()))) AS first_failure max(eval(if(event_id=4624,event_time,null()))) AS last_success BY _time dest_host account src_ip
+| where failure_count>=5 AND success_count>=1 AND last_success>=first_failure
+| convert ctime(first_failure) ctime(last_success)
+| table _time dest_host account src_ip failure_count success_count first_failure last_success
+| sort 0 -failure_count
