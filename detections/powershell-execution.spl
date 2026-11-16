@@ -1,0 +1,33 @@
+# DET-002 | Suspicious PowerShell Execution | Training / not production validated
+# Purpose: Surface PowerShell command lines (Security 4688) and script-block text (PowerShell Operational 4104)
+# for analyst review. Records from these two channels are NOT automatically linked to the same process/session.
+# Requirements: Replace index and sourcetypes with your environment's values; inspect extracted field names.
+# 4688 needs Audit Process Creation, plus Include command line in process creation events for command-line text.
+# 4104 needs PowerShell Script Block Logging/appropriate logging coverage; messages can be fragmented.
+# Run in an authorized Splunk environment; test with known benign and suspicious samples.
+index=windows ((sourcetype="WinEventLog:Security" EventCode=4688) OR (sourcetype="XmlWinEventLog:Security" EventCode=4688) OR (sourcetype="WinEventLog:Microsoft-Windows-PowerShell/Operational" EventCode=4104) OR (sourcetype="XmlWinEventLog:Microsoft-Windows-PowerShell/Operational" EventCode=4104))
+| eval event_id=tonumber(coalesce(EventCode, EventID))
+| eval dest_host=coalesce(ComputerName, Computer, host)
+| eval account=coalesce(SubjectUserName, User, user, "unknown")
+| eval executable=coalesce(NewProcessName, New_Process_Name, "")
+| eval command_line=coalesce(CommandLine, Process_Command_Line, "")
+| eval script_text=coalesce(ScriptBlockText, Script_Block_Text, "")
+| eval observed_text=case(event_id=4688, command_line, event_id=4104, script_text, true(), "")
+| where (event_id=4688 AND match(executable,"(?i)(^|[\\/])(powershell|pwsh)\.exe$") AND len(command_line)>0) OR (event_id=4104 AND len(script_text)>0)
+| eval encoded_command=if(match(observed_text,"(?i)(-|/)(enc|encodedcommand)(\s|:|$)"),1,0)
+| eval download_and_execute=if(match(observed_text,"(?i)(downloadstring|downloadfile|invoke-webrequest|iwr\b|start-bitstransfer|invoke-restmethod)"),1,0)
+| eval reflection_or_memory=if(match(observed_text,"(?i)(frombase64string|reflection\.assembly|virtualalloc|writeprocessmemory)"),1,0)
+| eval execution_policy_bypass=if(match(observed_text,"(?i)(executionpolicy\s+bypass|\-ep\s+bypass)"),1,0)
+| eval signal_count=encoded_command+download_and_execute+reflection_or_memory+execution_policy_bypass
+| where signal_count>0
+| eval evidence_source=if(event_id=4688,"4688 process creation command line","4104 PowerShell script-block content")
+| eval triage_priority=case(signal_count>=2,"Review promptly",signal_count=1,"Review",true(),"Informational")
+| table _time dest_host account event_id evidence_source executable command_line script_text encoded_command download_and_execute reflection_or_memory execution_policy_bypass signal_count triage_priority
+| sort 0 -_time
+
+# Notes:
+# 1. This detects text patterns, not confirmed malicious execution, downloads, or memory injection.
+# 2. 4104 records script-block content processed by PowerShell; content alone does not establish that every action succeeded.
+# 3. Some benign administration, deployment, and security tools use these patterns.
+# 4. Improve coverage with process identity, account/session context, parent processes, EDR, 4624, and network telemetry.
+# 5. Test missing-field/fragmented-4104 cases, allowlist approved jobs carefully, and examine false negatives.
